@@ -13,6 +13,7 @@ $valueToReport += ("Processor Threads: " + $processorThreads.ToString() + "||")
 
 $storage = ""
 
+$hdd = gcim Win32_DiskDrive | where {$_.MediaType -like "Fixed*"}
 $hdd | ForEach{$storage += $_.caption + ", Capacity: " + [math]::round(($_.Size / 1GB),'2') + "GB - "  }
 $valueToReport += ("Storage Info: " + $storage.Trim() + "||")
 
