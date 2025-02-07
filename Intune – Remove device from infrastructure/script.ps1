@@ -39,7 +39,7 @@ foreach ($serial in $importedSerials){
                 Write-Host "Error deleting Autopilot record for $serial : $_" -ForegroundColor Red
             }
             
-            # Delete Entra ID record using EntraID device ID as identifier
+            # Finally delete Entra ID record using EntraID device ID as identifier
             try {
                 Write-Host "Fetching Entra ID Device for $serial"
                 $entraIDValue = $device.AzureAdDeviceId
