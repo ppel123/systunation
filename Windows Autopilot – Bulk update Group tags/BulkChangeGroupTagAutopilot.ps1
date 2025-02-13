@@ -27,7 +27,8 @@ foreach($serial in $serials)
     Write-Host "Changing Group tag for: $serial"
     
     try {
-        Get-AutopilotDevice -serial $serial | Set-AutopilotDevice -groupTag $Grouptag
+        $autopilotDeviceInfo = Get-AutopilotDevice -serial $serial
+        Set-AutopilotDevice -id $autopilotDeviceInfo.id -groupTag $Grouptag
         Write-Host "Successfully updated group tag for device: $serial"
     } catch {
         Write-Host "Failed to update group tag for $serial. Error: $_"
