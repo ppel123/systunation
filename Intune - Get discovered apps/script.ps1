@@ -1,21 +1,21 @@
-Connect-MSGraph
+Connect-MGGraph
 
 # enter device name
-$device = "DESKTOP-22V7417"
+$device = "YourDeviceName"
 
 # get the device Intune ID
-$IntuneID = (Get-IntuneManagedDevice -Filter "deviceName eq '$device'" | select id).id
+$IntuneID = (Get-MgDeviceManagementManagedDevice -Filter "deviceName eq '$device'" | select id).id
 # Graph api url to get discovered apps
 $discoveredAppsUrl = "https://graph.microsoft.com/beta/deviceManagement/manageddevices('$IntuneID')/detectedApps?filter=&top=50"
 
 # perform the request
-$apps = Invoke-MSGraphRequest -Url $discoveredAppsUrl -HttpMethod GET
-# get all pages returned
+$apps = Invoke-MgGraphRequest -Method GET -Uri $discoveredAppsUrl
+
 $appsNextLink = $apps.'@odata.nextLink'
 $allApps = $apps.value
 
 while ($appNextLink){
-    $apps = Invoke-MSGraphRequest -Url $appNextLink -HttpMethod GET
+    $apps = Invoke-MgGraphRequest -Method GET -Uri $appNextLink
     $appsNextLink = $apps.'@odata.nextLink'
     $allApps += $apps.value
 }
