@@ -1,40 +1,159 @@
-Connect-MSGraph
+# =============================================================================
+# Get-AppAssignments.ps1
+# Retrieves all Windows app assignments from Intune, including group name,
+# assignment type (Included/Excluded/All Devices/All Users) and intent.
+# Requires: Microsoft.Graph PowerShell SDK
+# =============================================================================
 
-# url to get the desired apps. In this example all apps assigned to Windows devices are selected.
-$url = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?"+'$filter'+"=(isof(%27microsoft.graph.windowsStoreApp%27)%20or%20isof(%27microsoft.graph.microsoftStoreForBusinessApp%27)%20or%20isof(%27microsoft.graph.officeSuiteApp%27)%20or%20isof(%27microsoft.graph.win32LobApp%27)%20or%20isof(%27microsoft.graph.windowsMicrosoftEdgeApp%27)%20or%20isof(%27microsoft.graph.windowsPhone81AppX%27)%20or%20isof(%27microsoft.graph.windowsPhone81StoreApp%27)%20or%20isof(%27microsoft.graph.windowsPhoneXAP%27)%20or%20isof(%27microsoft.graph.windowsAppX%27)%20or%20isof(%27microsoft.graph.windowsMobileMSI%27)%20or%20isof(%27microsoft.graph.windowsUniversalAppX%27)%20or%20isof(%27microsoft.graph.webApp%27)%20or%20isof(%27microsoft.graph.windowsWebApp%27)%20or%20isof(%27microsoft.graph.winGetApp%27))%20and%20(microsoft.graph.managedApp/appAvailability%20eq%20null%20or%20microsoft.graph.managedApp/appAvailability%20eq%20%27lineOfBusiness%27%20or%20isAssigned%20eq%20true)&$orderby=displayName&"
-$apps = (Invoke-MSGraphRequest -Url "$url" -HttpMethod Get).Value
+# Connect using the new SDK
+Connect-MgGraph -Scopes "DeviceManagementApps.Read.All", "Group.Read.All"
 
-# create a new table object to present the results
-$table = New-Object System.Data.DataTable
+# -----------------------------------------------------------------------------
+# Build the filter URL to fetch all Windows app types
+# -----------------------------------------------------------------------------
+$baseUrl = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps"
+$filter  = '$filter' + "=" +
+    "(isof('microsoft.graph.windowsStoreApp')" +
+    " or isof('microsoft.graph.microsoftStoreForBusinessApp')" +
+    " or isof('microsoft.graph.officeSuiteApp')" +
+    " or isof('microsoft.graph.win32LobApp')" +
+    " or isof('microsoft.graph.windowsMicrosoftEdgeApp')" +
+    " or isof('microsoft.graph.windowsPhone81AppX')" +
+    " or isof('microsoft.graph.windowsPhone81StoreApp')" +
+    " or isof('microsoft.graph.windowsPhoneXAP')" +
+    " or isof('microsoft.graph.windowsAppX')" +
+    " or isof('microsoft.graph.windowsMobileMSI')" +
+    " or isof('microsoft.graph.windowsUniversalAppX')" +
+    " or isof('microsoft.graph.webApp')" +
+    " or isof('microsoft.graph.windowsWebApp')" +
+    " or isof('microsoft.graph.winGetApp'))" +
+    " and (microsoft.graph.managedApp/appAvailability eq null" +
+    " or microsoft.graph.managedApp/appAvailability eq 'lineOfBusiness'" +
+    " or isAssigned eq true)"
+$orderby = '$orderby=displayName'
 
-$table.Columns.Add("ApplicationName") | Out-Null
-$table.Columns.Add("ApplicationID") | Out-Null
-$table.Columns.Add("GroupName") | Out-Null
-$table.Columns.Add("GroupID") | Out-Null
+$url = "$baseUrl`?$filter&$orderby"
 
-# iterate through all apps and get assignments
-foreach ($app in $apps){
-    # for each app get the app name and id
-    $appID = $app.id
-    $appDisplayName = $app.displayName
-    # create the Graph API url to get the groups assigned to each application
-    $assignmentUrl = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appID/?"+'$expand'+"=categories,assignments"
-    $assignments = (Invoke-MSGraphRequest -Url "$assignmentUrl" -HttpMethod Get)
+# -----------------------------------------------------------------------------
+# Fetch all apps - handle pagination via @odata.nextLink
+# -----------------------------------------------------------------------------
+$apps     = [System.Collections.Generic.List[object]]::new()
+$nextLink = $url
 
-    # iterate through all assigned groups
-    foreach ($assignment in $assignments){
-        $assignedGroupsIDs = $assignments.assignments.target
-        foreach ($group in $assignedGroupsIDs){
-            $groupID = $group.groupId
-            # create the Graph API url and get the group name
-            $groupUrl = "https://graph.microsoft.com/beta/groups/$groupID"
-            $groupDetails = (Invoke-MSGraphRequest -Url "$groupUrl" -HttpMethod Get)
-            $groupName = $groupDetails.displayName
-            $table.Rows.Add($appDisplayName, $appID, $groupName, $groupID)
-        }
+do {
+    $response = Invoke-MgGraphRequest -Uri $nextLink -Method GET
+    $apps.AddRange($response.value)
+    $nextLink = $response.'@odata.nextLink'
+} while ($nextLink)
+
+Write-Host "Total apps retrieved: $($apps.Count)" -ForegroundColor Cyan
+
+# -----------------------------------------------------------------------------
+# Helper: translate @odata.type to a readable assignment type
+# -----------------------------------------------------------------------------
+function Get-AssignmentType {
+    param([string]$ODataType)
+    switch ($ODataType) {
+        "#microsoft.graph.groupAssignmentTarget"             { return "Included" }
+        "#microsoft.graph.exclusionGroupAssignmentTarget"    { return "Excluded" }
+        "#microsoft.graph.allDevicesAssignmentTarget"        { return "All Devices" }
+        "#microsoft.graph.allLicensedUsersAssignmentTarget"  { return "All Users" }
+        default                                              { return $ODataType }
     }
 }
 
-# display the results and export a csv
-$table | Out-GridView
-$table | Export-Csv -Path "C:\Users\Public\AppsAndGroups.csv" -Delimiter "," -Encoding UTF8 -NoTypeInformation -NoClobber
+# -----------------------------------------------------------------------------
+# Build result table
+# -----------------------------------------------------------------------------
+$table = New-Object System.Data.DataTable
+$table.Columns.Add("ApplicationName") | Out-Null
+$table.Columns.Add("ApplicationID")   | Out-Null
+$table.Columns.Add("GroupName")       | Out-Null
+$table.Columns.Add("GroupID")         | Out-Null
+$table.Columns.Add("AssignmentType")  | Out-Null   # Included / Excluded / All Devices / All Users
+$table.Columns.Add("Intent")          | Out-Null   # required / available / uninstall / availableWithoutEnrollment
+
+# Cache group display names to minimise API calls
+$groupCache = @{}
+
+# -----------------------------------------------------------------------------
+# Iterate apps and resolve assignments
+# -----------------------------------------------------------------------------
+$counter = 0
+
+foreach ($app in $apps) {
+    $counter++
+    $appID          = $app.id
+    $appDisplayName = $app.displayName
+
+    Write-Progress -Activity "Processing apps" `
+                   -Status "$counter of $($apps.Count): $appDisplayName" `
+                   -PercentComplete (($counter / $apps.Count) * 100)
+
+    # Fetch app details with assignments expanded - note ?$expand (not /$expand)
+    $assignmentUrl = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$appID" + '?$expand=assignments'
+    
+    try {
+        $appDetails = Invoke-MgGraphRequest -Uri $assignmentUrl -Method GET
+    }
+    catch {
+        Write-Warning "Failed to retrieve assignments for '$appDisplayName' ($appID): $_"
+        continue
+    }
+
+    # Skip apps with no assignments
+    if (-not $appDetails.assignments -or $appDetails.assignments.Count -eq 0) {
+        continue
+    }
+
+    foreach ($assignment in $appDetails.assignments) {
+        $target         = $assignment.target
+        $odataType      = $target.'@odata.type'
+        $assignmentType = Get-AssignmentType -ODataType $odataType
+        $intent         = $assignment.intent
+        $groupID        = $target.groupId
+
+        # Resolve group name based on target type
+        switch ($odataType) {
+            "#microsoft.graph.allDevicesAssignmentTarget"       { $groupName = "All Devices"; $groupID = "" }
+            "#microsoft.graph.allLicensedUsersAssignmentTarget" { $groupName = "All Users";   $groupID = "" }
+            default {
+                if ($groupID) {
+                    if (-not $groupCache.ContainsKey($groupID)) {
+                        try {
+                            $groupDetails         = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/beta/groups/$groupID" -Method GET
+                            $groupCache[$groupID] = $groupDetails.displayName
+                        }
+                        catch {
+                            Write-Warning "Could not resolve group '$groupID': $_"
+                            $groupCache[$groupID] = "Unknown"
+                        }
+                    }
+                    $groupName = $groupCache[$groupID]
+                }
+                else {
+                    $groupName = "Unknown"
+                }
+            }
+        }
+
+        $table.Rows.Add($appDisplayName, $appID, $groupName, $groupID, $assignmentType, $intent) | Out-Null
+    }
+}
+
+Write-Progress -Activity "Processing apps" -Completed
+Write-Host "Total assignment rows: $($table.Rows.Count)" -ForegroundColor Green
+
+# -----------------------------------------------------------------------------
+# Output results
+# -----------------------------------------------------------------------------
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$exportPath = "C:\Temp\AppsAndGroups_$timestamp.csv"
+
+# Display results in console
+$table | Format-Table -AutoSize
+
+$table | Out-GridView -Title "Intune App Assignments"
+$table | Export-Csv -Path $exportPath -Delimiter "," -Encoding UTF8 -NoTypeInformation
+
+Write-Host "CSV exported to: $exportPath" -ForegroundColor Green
