@@ -1,5 +1,4 @@
 # =============================================================================
-# Get-AppAssignments.ps1
 # Retrieves all Windows app assignments from Intune, including group name,
 # assignment type (Included/Excluded/All Devices/All Users) and intent.
 # Requires: Microsoft.Graph PowerShell SDK
