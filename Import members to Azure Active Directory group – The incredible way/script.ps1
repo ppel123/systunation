@@ -1,15 +1,20 @@
-Connect-AzureAD
-Connect-MSGraph
+Connect-MgGraph -Scopes "Group.ReadWrite.All", "Device.Read.All", "DeviceManagementManagedDevices.Read.All"
 
-$devices = Get-Content -Path "C:\Users\Public\devicesNames.txt"
+$devicesPath = "C:\Temp\deviceNames.txt"
+if (-not (Test-Path $devicesPath)) {
+    Write-Warning "Device list not found at: $devicesPath"
+    exit
+}
+$devices = Get-Content -Path $devicesPath
 
 $group = Read-Host -Prompt "Give the group name: "
 try{
-    $groupObjectID = (Get-AzureADGroup -SearchString $group | select objectID).objectID
+    $groupObject = Get-MgGroup -Filter "displayName eq '$group'"
+    $groupObjectID = $groupObject.Id
     Write-Host "Group Object ID: $groupObjectID"
 }
 catch{
-    Write-Output "Azure AD Group does not exist or insufficient right"
+    Write-Output "Entra ID Group does not exist or insufficient right"
     Start-Sleep -Seconds 3
     exit
 }
@@ -17,12 +22,13 @@ catch{
 foreach ($device in $devices){
     Write-Host "-------------------------"
     Write-Host "Going to import device: $device"
-    $AzureDevice = Get-IntuneManagedDevice -Filter "deviceName eq '$device'"
+    $IntuneDevice = Get-MgDeviceManagementManagedDevice -Filter "deviceName eq '$device'"
 
-    if ($AzureDevice -ne $null){
-        $AzureADID = $AzureDevice.azureADDeviceId
-        Write-Host "Device AzureAD ID: $AzureADID"
-        $DeviceObjectID = (Get-AzureADDevice -Filter "deviceId eq guid'$AzureADID'" | select objectID).objectID
+    if ($null -ne $IntuneDevice){
+        $EntraDeviceID = $IntuneDevice.AzureADDeviceId
+        Write-Host "Device Entra ID: $EntraDeviceID"
+        $DeviceObject = Get-MgDevice -Filter "deviceId eq '$EntraDeviceID'"
+        $DeviceObjectID = $DeviceObject.Id
         Write-Host "Device Object ID: $DeviceObjectID"
     }
     else{
@@ -30,11 +36,11 @@ foreach ($device in $devices){
         continue
     }
 
-    $isDeviceMemberOfGroup = Get-AzureADGroupMember -ObjectId $groupObjectID -All $true | Where-Object {$_.DisplayName -like "*$($device)*"}
+    $isDeviceMemberOfGroup = Get-MgGroupMember -GroupId $groupObjectID -All | Where-Object {$_.AdditionalProperties.displayName -like "*$($device)*"}
 
-    if($isUserMemberOfGroup -eq $null) {
+    if($isDeviceMemberOfGroup -eq $null) {
         Write-Host "Adding the device $device to group $group"
-        Add-AzureADGroupMember -ObjectId $groupObjectID -RefObjectId $DeviceObjectID
+        New-MgGroupMember -GroupId $groupObjectID -DirectoryObjectId $DeviceObjectID
     }
     else{
         Write-Host "Device already member"
