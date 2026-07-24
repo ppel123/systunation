@@ -15,7 +15,8 @@
     removal, effectively reinstalling the app fresh.
 
 .NOTES
-    Required Graph permission: DeviceManagementManagedDevices.PrivilegedOperations.All
+    Required Graph permission: DeviceManagementManagedDevices.PrivilegedOperations.All,
+    DeviceManagementApps.Read.All, DeviceManagementManagedDevices.ReadWrite.All
     Author : Paris Petsanas / systunation.com
 #>
 
@@ -58,7 +59,8 @@ try {
         Write-Log "No active session found - connecting..."
         Connect-MgGraph -Scopes @(
             "DeviceManagementManagedDevices.ReadWrite.All",
-            "DeviceManagementManagedDevices.PrivilegedOperations.All"
+            "DeviceManagementManagedDevices.PrivilegedOperations.All",
+            "DeviceManagementApps.Read.All"
         ) | Out-Null
         Write-Log "Connected to Microsoft Graph." "SUCCESS"
     } else {
