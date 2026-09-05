@@ -4,9 +4,40 @@
 
 .DESCRIPTION
     Reads serial numbers from a file (one per line, or a CSV with a SerialNumber column),
-    looks up each managed device in Intune, resolves the most recent interactive user from
-    the beta 'usersLoggedOn' property, and falls back to the device compliance report when
-    'usersLoggedOn' is empty. Results are exported to CSV.
+    looks up each managed device in Intune, and resolves the most recent interactive user
+    from the beta 'usersLoggedOn' property. Results are exported to CSV.
+
+    ---------------------------------------------------------------------------
+    NOTE ON HTTP METHODS  --  read this before choosing a mode
+    ---------------------------------------------------------------------------
+    Everything this script needs for the primary lookup is a plain HTTP GET:
+
+        GET /beta/deviceManagement/managedDevices/{id}        (usersLoggedOn)
+        Get-MgDeviceManagementManagedDevice / Get-MgUser      (GET under the hood)
+
+    The optional extended check uses the Intune reporting endpoint:
+
+        POST /beta/deviceManagement/reports/getDevicePoliciesComplianceReport
+
+    That is a POST even though it only *reads* data. The Intune reporting API is
+    built as an RPC-style endpoint: the filter, paging, sort and column selection
+    are sent as a JSON body, which a GET cannot carry. So the POST here writes
+    nothing and changes nothing in the tenant -- it is a read wearing a POST verb.
+
+    Some environments still object to POST calls for read-only reporting (change
+    control, API gateway / WAF rules, or a delegated account that is only allowed
+    to issue GETs). If that applies to you, run Mode 1 and no POST is ever sent.
+
+.PARAMETER Mode
+    1 = GET only. Uses only the managedDevices GET. Devices with an empty
+        'usersLoggedOn' are still exported, with '--Unknown--' in the user
+        columns. No POST request is ever issued.
+
+    2 = Extended check. Same as Mode 1, but when 'usersLoggedOn' is empty the
+        script additionally POSTs to getDevicePoliciesComplianceReport to try to
+        recover a UPN and last-contact time. Fills more gaps, but sends POSTs.
+
+    Prompted for if not supplied.
 
 .PARAMETER CsvPath
     Path to the file containing serial numbers. Prompted for if not supplied.
@@ -16,12 +47,19 @@
     directory on other platforms.
 
 .EXAMPLE
-    .\Get-LastLoggedOnUser.ps1 -CsvPath C:\Temp\serials.csv
+    .\Get-LastLoggedOnUser.ps1 -CsvPath C:\Temp\serials.csv -Mode 1
+
+.EXAMPLE
+    .\Get-LastLoggedOnUser.ps1 -CsvPath C:\Temp\serials.csv -Mode 2
 #>
 
 [CmdletBinding()]
 param(
+    [ValidateSet('1', '2')]
+    [string]$Mode,
+
     [string]$CsvPath,
+
     [string]$OutputPath
 )
 
@@ -45,6 +83,31 @@ if (-not $OutputPath) {
     $base = if ($env:PUBLIC) { $env:PUBLIC } else { (Get-Location).Path }
     $OutputPath = Join-Path $base 'LastLoggedOnUser.csv'
 }
+
+# Ask for the mode before authenticating, so a wrong answer costs nothing.
+if (-not $Mode) {
+    Write-Host ""
+    Write-Host "Select lookup mode:" -ForegroundColor Cyan
+    Write-Host "  1 = GET only        - managedDevices GET / usersLoggedOn. No POST requests at all."
+    Write-Host "  2 = Extended check  - as above, plus a POST to the compliance report endpoint"
+    Write-Host "                        for devices with no usersLoggedOn data (read-only, but a POST)."
+    Write-Host ""
+    $Mode = Read-Host -Prompt "Type 1 or 2"
+    $Mode = $Mode.Trim()
+}
+
+if ($Mode -notin @('1', '2')) {
+    Write-Host "Invalid choice '$Mode'. Type 1 or 2. Exiting." -ForegroundColor Red
+    return
+}
+
+$useComplianceFallback = ($Mode -eq '2')
+
+Write-Host ("Mode {0}: {1}" -f $Mode, $(if ($useComplianceFallback) {
+    'GET lookup with compliance-report fallback (POST requests will be sent)'
+} else {
+    'GET requests only'
+})) -ForegroundColor Cyan
 
 Connect-MgGraph -Scopes "DeviceManagementManagedDevices.Read.All", "User.Read.All" -NoWelcome
 
@@ -143,7 +206,7 @@ $table = New-Object System.Data.DataTable
 
 @(
     'DeviceId', 'DeviceName', 'SerialNumber', 'UPN', 'UserDisplayName',
-    'LastLogonUser', 'LastLogonUserEmail', 'LastLogonTime',
+    'LastLogonUser', 'LastLogonUserEmail', 'LastLogonTime', 'UserSource',
     'Model', 'Manufacturer', 'ComplianceState', 'LastSyncTime', 'EnrollDate',
     'OperatingSystem', 'DeviceOwnership', 'ManagementAgent', 'EnrollmentType'
 ) | ForEach-Object { $table.Columns.Add($_) | Out-Null }
@@ -159,6 +222,7 @@ foreach ($device in $devices) {
     $userName      = '--Unknown--'
     $userEmail     = '--Unknown--'
     $lastLogonTime = $null
+    $userSource    = 'none'
 
     $id  = $device.Id
     $url = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$id"
@@ -182,6 +246,7 @@ foreach ($device in $devices) {
 
         $lastUserId    = $usersLoggedOn[0].userId
         $lastLogonTime = $usersLoggedOn[0].lastLogOnDateTime
+        $userSource    = 'usersLoggedOn'
 
         if ($lastUserId) {
             try {
@@ -194,8 +259,15 @@ foreach ($device in $devices) {
             }
         }
     }
+    elseif (-not $useComplianceFallback) {
+        # Mode 1: no usersLoggedOn data and no POST allowed -- export the device with
+        # '--Unknown--' user columns rather than issuing the compliance-report request.
+        Write-Host "  No usersLoggedOn data (Mode 1: skipping compliance-report fallback)" -ForegroundColor DarkGray
+    }
     else {
-        # Fallback: device compliance report often still carries a UPN and last contact time.
+        # Mode 2 fallback: device compliance report often still carries a UPN and last
+        # contact time. NOTE: this is a POST to a read-only reporting endpoint (see the
+        # header of this script) -- it does not modify anything in the tenant.
         $body = @{
             select  = @()
             skip    = 0
@@ -235,6 +307,8 @@ foreach ($device in $devices) {
                 $userInfo      = if ($colIndex.ContainsKey($userColName)) { $items[$colIndex[$userColName]] } else { $null }
                 $lastLogonTime = if ($colIndex.ContainsKey($timeColName)) { $items[$colIndex[$timeColName]] } else { $null }
 
+                if ($userInfo -or $lastLogonTime) { $userSource = 'complianceReport' }
+
                 if ($userInfo) {
                     try {
                         $user      = Get-MgUser -UserId $userInfo -ErrorAction Stop
@@ -251,7 +325,7 @@ foreach ($device in $devices) {
 
     $table.Rows.Add(
         $device.Id, $device.DeviceName, $device.SerialNumber, $device.UserPrincipalName, $device.UserDisplayName,
-        $userName, $userEmail, $lastLogonTime,
+        $userName, $userEmail, $lastLogonTime, $userSource,
         $device.Model, $device.Manufacturer, $device.ComplianceState, $device.LastSyncDateTime, $device.EnrolledDateTime,
         $device.OperatingSystem, $device.ManagedDeviceOwnerType, $device.ManagementAgent, $device.DeviceEnrollmentType
     ) | Out-Null
@@ -268,6 +342,20 @@ $table.Rows |
     Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8
 
 Write-Host "Exported $($table.Rows.Count) row(s) to $OutputPath" -ForegroundColor Green
+
+# UserSource shows where each row's user came from: usersLoggedOn (GET), complianceReport
+# (POST, Mode 2 only), or none.
+$table.Rows |
+    Group-Object -Property UserSource |
+    Sort-Object Name |
+    ForEach-Object { Write-Host ("  UserSource '{0}': {1} row(s)" -f $_.Name, $_.Count) -ForegroundColor Gray }
+
+if ($Mode -eq '1') {
+    $unresolved = @($table.Rows | Where-Object { $_.UserSource -eq 'none' }).Count
+    if ($unresolved -gt 0) {
+        Write-Host "$unresolved device(s) had no usersLoggedOn data. Re-run with -Mode 2 to try the compliance report (sends POST requests)." -ForegroundColor DarkYellow
+    }
+}
 
 if ($notFound.Count -gt 0) {
     Write-Host "$($notFound.Count) serial(s) had no matching Intune device:" -ForegroundColor Yellow
